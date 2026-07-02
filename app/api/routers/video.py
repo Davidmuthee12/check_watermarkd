@@ -8,6 +8,19 @@ from app.workers.tasks import process_video
 router = APIRouter()
 
 
+def serialize_task_result(task: AsyncResult):
+    if task.failed():
+        result = task.result
+
+        return {
+            "error": str(result),
+            "type": type(result).__name__,
+            "traceback": task.traceback,
+        }
+
+    return task.result
+
+
 @router.post("/video")
 async def upload(
     request: VideoRequest,
@@ -32,5 +45,5 @@ async def status(
 
     return {
         "status": task.status,
-        "result": task.result,
+        "result": serialize_task_result(task),
     }
