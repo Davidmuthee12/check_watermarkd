@@ -16,8 +16,6 @@ class VideoService:
 
         self.extractor = FrameExtractor()
 
-        self.detector = WatermarkDetector()
-
         self.cleanup = CleanupService()
 
     async def check_watermarked(
@@ -26,14 +24,19 @@ class VideoService:
     ) -> WatermarkResponse:
 
         started = time.perf_counter()
+        paths_to_cleanup = []
 
         try:
             video_path = await self.downloader.download(str(request.video_url))
+            paths_to_cleanup.append(video_path)
 
             frame_paths = await self.extractor.extract(video_path)
+            paths_to_cleanup.extend(frame_paths)
+
+            detector = WatermarkDetector()
 
             detections = [
-                self.detector.detect(frame)
+                detector.detect(frame)
                 for frame in frame_paths
             ]
 
@@ -43,7 +46,7 @@ class VideoService:
 
             finished = time.perf_counter()
         finally:
-            self.cleanup.cleanup()
+            self.cleanup.cleanup(paths_to_cleanup)
 
         return WatermarkResponse(
             watermarked=len(detected_platforms) > 0,
