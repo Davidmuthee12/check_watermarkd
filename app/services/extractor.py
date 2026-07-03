@@ -2,7 +2,12 @@ from pathlib import Path
 import asyncio
 import json
 
-from app.core.constants import FRAME_DIR
+from app.core.constants import (
+    FRAME_DIR,
+    FRAME_WIDTH,
+    MAX_EXTRACTED_FRAMES,
+    MIN_FRAME_INTERVAL_SECONDS,
+)
 
 
 class FrameExtractor:
@@ -32,24 +37,38 @@ class FrameExtractor:
 
         return float(metadata["format"]["duration"])
 
-    async def extract_frame(
+    async def extract(
         self,
         video_path: Path,
-        second: float,
-        output: Path,
-    ) -> Path:
+    ) -> list[Path]:
+
+        duration = await self.get_duration(video_path)
+
+        interval = max(
+            duration / MAX_EXTRACTED_FRAMES,
+            MIN_FRAME_INTERVAL_SECONDS,
+        )
+        output_pattern = FRAME_DIR / f"{video_path.stem}_%03d.jpg"
+        video_filter = (
+            f"fps=1/{interval},"
+            f"scale={FRAME_WIDTH}:-2:force_original_aspect_ratio=decrease,"
+            "format=gray"
+        )
 
         process = await asyncio.create_subprocess_exec(
             "ffmpeg",
-            "-ss",
-            str(second),
+            "-hide_banner",
+            "-loglevel",
+            "error",
             "-i",
             str(video_path),
+            "-vf",
+            video_filter,
             "-frames:v",
-            "1",
+            str(MAX_EXTRACTED_FRAMES),
             "-q:v",
-            "1",
-            str(output),
+            "2",
+            str(output_pattern),
             "-y",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -60,33 +79,9 @@ class FrameExtractor:
         if process.returncode != 0:
             raise RuntimeError(stderr.decode())
 
-        return output
+        frames = sorted(FRAME_DIR.glob(f"{video_path.stem}_*.jpg"))
 
-    async def extract(
-        self,
-        video_path: Path,
-    ) -> list[Path]:
+        if not frames:
+            raise RuntimeError("ffmpeg did not extract any frames")
 
-        duration = await self.get_duration(video_path)
-
-        positions = [
-            duration * 0.10,
-            duration * 0.50,
-            duration * 0.90,
-        ]
-
-        outputs = [FRAME_DIR / f"{video_path.stem}_{i}.jpg" for i in range(3)]
-
-        tasks = [
-            self.extract_frame(
-                video_path,
-                second,
-                output,
-            )
-            for second, output in zip(
-                positions,
-                outputs,
-            )
-        ]
-
-        return await asyncio.gather(*tasks)
+        return frames
