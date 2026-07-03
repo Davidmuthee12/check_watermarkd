@@ -1,10 +1,29 @@
 from pathlib import Path
+import re
 
 import cv2
 import easyocr
 import numpy as np
 
-from app.core.constants import WATERMARK_IDENTIFIERS
+from app.core.constants import (
+    OCR_CONFIDENCE_THRESHOLD,
+    PLATFORM_WATERMARKS,
+)
+
+
+_reader: easyocr.Reader | None = None
+
+
+def get_reader() -> easyocr.Reader:
+    global _reader
+
+    if _reader is None:
+        _reader = easyocr.Reader(
+            ["en"],
+            gpu=False,
+        )
+
+    return _reader
 
 
 class WatermarkDetector:
@@ -14,11 +33,7 @@ class WatermarkDetector:
     """
 
     def __init__(self):
-        # Loads the OCR model once when the service starts.
-        self.reader = easyocr.Reader(
-            ["en"],
-            gpu=False,
-        )
+        self.reader = get_reader()
 
     def preprocess(self, frame_path: Path) -> np.ndarray:
         """
@@ -31,7 +46,10 @@ class WatermarkDetector:
         if image is None:
             raise ValueError(f"Unable to read frame {frame_path}")
 
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if len(image.shape) == 2:
+            gray = image
+        else:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
         clahe = cv2.createCLAHE(
             clipLimit=2.0,
@@ -40,14 +58,34 @@ class WatermarkDetector:
 
         enhanced = clahe.apply(gray)
 
-        thresholded = cv2.threshold(
+        thresholded = cv2.adaptiveThreshold(
             enhanced,
-            0,
             255,
-            cv2.THRESH_BINARY + cv2.THRESH_OTSU,
-        )[1]
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            7,
+        )
 
         return thresholded
+
+    def watermark_regions(self, image: np.ndarray) -> list[np.ndarray]:
+        height, width = image.shape[:2]
+        half_height = max(height // 2, 1)
+        half_width = max(width // 2, 1)
+        band_height = max(height // 4, 1)
+
+        return [
+            image[:half_height, :half_width],
+            image[:half_height, half_width:],
+            image[half_height:, :half_width],
+            image[half_height:, half_width:],
+            image[height - band_height:, :],
+        ]
+
+    def normalize_text(self, text: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", " ", text.lower())
+        return re.sub(r"\s+", " ", normalized).strip()
 
     def detect(self, frame_path: Path) -> list[str]:
         """
@@ -56,21 +94,27 @@ class WatermarkDetector:
 
         processed = self.preprocess(frame_path)
 
-        results = self.reader.readtext(
-            processed,
-            detail=1,
-        )
+        results = []
+
+        for region in self.watermark_regions(processed):
+            results.extend(
+                self.reader.readtext(
+                    region,
+                    detail=1,
+                    paragraph=False,
+                )
+            )
 
         detected = set()
 
         for _, text, confidence in results:
-            if confidence < 0.40:
+            if confidence < OCR_CONFIDENCE_THRESHOLD:
                 continue
 
-            lower = text.lower()
+            normalized = self.normalize_text(text)
 
-            for keyword in WATERMARK_IDENTIFIERS:
-                if keyword in lower:
-                    detected.add(keyword.title())
+            for platform, keywords in PLATFORM_WATERMARKS.items():
+                if any(keyword in normalized for keyword in keywords):
+                    detected.add(platform)
 
         return sorted(detected)
